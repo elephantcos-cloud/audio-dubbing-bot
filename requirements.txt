@@ -3,6 +3,5 @@ groq==0.13.1
 flask==3.0.3
 requests==2.32.3
 pydub==0.25.1
-audioop-lts==0.2.1
 edge-tts==6.1.12
 imageio-ffmpeg==0.5.1
