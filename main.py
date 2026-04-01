@@ -447,6 +447,7 @@ async def run_dubbing_pipeline(
         # ── STEP 3: Translate + TTS + Timing ──
         output_audio  = AudioSegment.silent(duration=total_duration_ms)
         success_count = 0
+        last_tts_error = "অজানা কারণ"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for i, seg in enumerate(segments):
@@ -492,17 +493,24 @@ async def run_dubbing_pipeline(
                 # TTS generate
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
-                    await generate_tts_segment(translated, voice, tts_path)
+                    # edge-tts দিয়ে audio তৈরি
+                    communicate = edge_tts.Communicate(translated, voice)
+                    await communicate.save(tts_path)
+
+                    if not os.path.exists(tts_path) or os.path.getsize(tts_path) == 0:
+                        raise Exception(f"TTS file empty বা তৈরি হয়নি")
+
                     tts_audio = AudioSegment.from_file(tts_path)
                     adjusted  = adjust_audio_timing(tts_audio, duration_ms)
                     output_audio  = output_audio.overlay(adjusted, position=start_ms)
                     success_count += 1
                 except Exception as e:
+                    last_tts_error = str(e)
                     logger.error(f"TTS failed for seg {i}: {e}")
                     continue
 
             if success_count == 0:
-                raise Exception("কোনো segment process করা যায়নি! আবার চেষ্টা করো।")
+                raise Exception(f"TTS error: {last_tts_error}")
 
             # ── STEP 4: Export & Send ──
             await update_progress(
