@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: audio-dubbing-bot
+    env: python
+    plan: free
+    buildCommand: apt-get update -y && apt-get install -y ffmpeg && pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: RENDER_URL
+        sync: false
