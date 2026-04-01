@@ -244,11 +244,19 @@ def transcribe_audio_sync(audio_path: str) -> dict:
 
     if hasattr(response, 'segments') and response.segments:
         for s in response.segments:
-            segments.append({
-                'start': float(s.start),
-                'end':   float(s.end),
-                'text':  s.text.strip()
-            })
+            # Groq API কখনো dict, কখনো object return করে — দুটোই handle করো
+            if isinstance(s, dict):
+                segments.append({
+                    'start': float(s.get('start', 0)),
+                    'end':   float(s.get('end', 0)),
+                    'text':  s.get('text', '').strip()
+                })
+            else:
+                segments.append({
+                    'start': float(s.start),
+                    'end':   float(s.end),
+                    'text':  s.text.strip()
+                })
         text = response.text or ' '.join(s['text'] for s in segments)
     elif hasattr(response, 'text'):
         text = response.text
