@@ -1,7 +1,7 @@
 python-telegram-bot==20.7
-groq==0.13.1
-flask==3.0.3
-requests==2.32.3
+groq==0.4.2
 pydub==0.25.1
-gtts==2.5.1
-imageio-ffmpeg==0.5.1
+imageio-ffmpeg==0.4.9
+edge-tts==6.1.9
+Flask==3.0.0
+requests==2.31.0
