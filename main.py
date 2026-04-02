@@ -198,8 +198,20 @@ def self_ping():
 # ══════════════════════════════════════════════
 # 🎨  KEYBOARDS
 # ══════════════════════════════════════════════
+def get_source_language_keyboard():
+    """মূল অডিওর ভাষা সিলেক্ট করার keyboard"""
+    lang_items = list(LANGUAGES.items())
+    keyboard = []
+    for i in range(0, len(lang_items), 2):
+        row = []
+        for code, name in lang_items[i:i+2]:
+            row.append(InlineKeyboardButton(name, callback_data=f"src_{code}"))
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ বাতিল করো", callback_data="dub_cancel")])
+    return InlineKeyboardMarkup(keyboard)
+
 def get_language_keyboard():
-    """ভাষা সিলেক্ট করার keyboard"""
+    """ডাবিং ভাষা সিলেক্ট করার keyboard"""
     lang_items = list(LANGUAGES.items())
     keyboard = []
     for i in range(0, len(lang_items), 2):
@@ -207,9 +219,7 @@ def get_language_keyboard():
         for code, name in lang_items[i:i+2]:
             row.append(InlineKeyboardButton(name, callback_data=f"dub_{code}"))
         keyboard.append(row)
-    keyboard.append([
-        InlineKeyboardButton("❌ বাতিল করো", callback_data="dub_cancel")
-    ])
+    keyboard.append([InlineKeyboardButton("❌ বাতিল করো", callback_data="dub_cancel")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_start_keyboard():
@@ -224,27 +234,29 @@ def get_start_keyboard():
 # ══════════════════════════════════════════════
 # 🎵  CORE AUDIO PROCESSING
 # ══════════════════════════════════════════════
-def transcribe_audio_sync(audio_path: str) -> dict:
+def transcribe_audio_sync(audio_path: str, source_lang: str = None) -> dict:
     """Groq Whisper দিয়ে অডিও transcribe করো (timestamp সহ)"""
     ext = os.path.splitext(audio_path)[1].lower()
 
     with open(audio_path, 'rb') as f:
         file_content = f.read()
 
-    response = groq_mgr.transcribe(
+    kwargs = dict(
         file=(f"audio{ext}", file_content),
         model="whisper-large-v3",
         response_format="verbose_json",
         timestamp_granularities=["segment"],
         temperature=0.0
     )
+    if source_lang:
+        kwargs['language'] = source_lang
+    response = groq_mgr.transcribe(**kwargs)
 
     segments = []
     text = ''
 
     if hasattr(response, 'segments') and response.segments:
         for s in response.segments:
-            # Groq API কখনো dict, কখনো object return করে — দুটোই handle করো
             if isinstance(s, dict):
                 segments.append({
                     'start': float(s.get('start', 0)),
@@ -294,10 +306,10 @@ def translate_segment_sync(text: str, target_lang: str) -> str:
     result = result.strip('"\'`')
     return result
 
-def generate_tts_segment(text: str, lang: str, output_path: str):
-    """Google TTS দিয়ে টেক্সট থেকে অডিও তৈরি করো"""
-    tts = gTTS(text=text, lang=lang, slow=False)
-    tts.save(output_path)
+async def generate_tts_segment(text: str, voice: str, output_path: str):
+    """Edge TTS দিয়ে টেক্সট থেকে অডিও তৈরি করো"""
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_path)
 
 def adjust_audio_timing(audio: AudioSegment, target_ms: int) -> AudioSegment:
     """অডিওর timing ঠিক করো — speed up / slow down / pad"""
@@ -353,7 +365,8 @@ async def run_dubbing_pipeline(
     bot,
     uid: int,
     audio_info: dict,
-    target_lang: str
+    target_lang: str,
+    source_lang: str = None
 ):
     """সম্পূর্ণ ডাবিং pipeline চালাও"""
     lang_name = LANGUAGES[target_lang]
@@ -411,7 +424,7 @@ async def run_dubbing_pipeline(
         # ── STEP 2: Transcribe ──
         transcript_data = await loop.run_in_executor(
             executor,
-            functools.partial(transcribe_audio_sync, audio_path)
+            functools.partial(transcribe_audio_sync, audio_path, source_lang)
         )
 
         segments  = transcript_data.get('segments', [])
@@ -447,7 +460,6 @@ async def run_dubbing_pipeline(
         # ── STEP 3: Translate + TTS + Timing ──
         output_audio  = AudioSegment.silent(duration=total_duration_ms)
         success_count = 0
-        last_tts_error = "অজানা কারণ"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for i, seg in enumerate(segments):
@@ -493,26 +505,20 @@ async def run_dubbing_pipeline(
                 # TTS generate
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
-                    # Google TTS দিয়ে audio তৈরি (sync, executor-এ চালাও)
-                    await loop.run_in_executor(
-                        executor,
-                        functools.partial(generate_tts_segment, translated, voice, tts_path)
-                    )
-
+                    tts = gTTS(text=translated, lang=voice, slow=False)
+                    tts.save(tts_path)
                     if not os.path.exists(tts_path) or os.path.getsize(tts_path) == 0:
-                        raise Exception(f"TTS file empty বা তৈরি হয়নি")
-
+                        raise Exception("TTS file empty")
                     tts_audio = AudioSegment.from_file(tts_path)
                     adjusted  = adjust_audio_timing(tts_audio, duration_ms)
                     output_audio  = output_audio.overlay(adjusted, position=start_ms)
                     success_count += 1
                 except Exception as e:
-                    last_tts_error = str(e)
                     logger.error(f"TTS failed for seg {i}: {e}")
                     continue
 
             if success_count == 0:
-                raise Exception(f"TTS error: {last_tts_error}")
+                raise Exception(f"TTS error — কোনো segment process হয়নি!")
 
             # ── STEP 4: Export & Send ──
             await update_progress(
@@ -709,10 +715,10 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"⏱️ দৈর্ঘ্য: {dur_str}\n"
         f"📏 সাইজ: {size_str}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🌐 *কোন ভাষায় ডাব করবো?*\n"
-        f"নিচ থেকে ভাষা সিলেক্ট করো 👇",
+        f"🗣️ *অডিওতে কোন ভাষায় কথা বলা আছে?*\n"
+        f"নিচ থেকে মূল ভাষা সিলেক্ট করো 👇",
         parse_mode='Markdown',
-        reply_markup=get_language_keyboard()
+        reply_markup=get_source_language_keyboard()
     )
 
 # ══════════════════════════════════════════════
@@ -809,6 +815,25 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data.startswith("src_"):
+        src_lang = data[4:]
+        audio_info = user_audio.get(uid)
+        if not audio_info:
+            await query.edit_message_text("❌ অডিও পাওয়া যায়নি। নতুন অডিও পাঠাও।")
+            return
+        # মূল ভাষা সেভ করো
+        audio_info['source_lang'] = src_lang
+        src_lang_name = LANGUAGES.get(src_lang, src_lang)
+        await query.edit_message_text(
+            f"✅ মূল ভাষা: *{src_lang_name}*\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 *এখন কোন ভাষায় ডাব করবো?*\n"
+            f"নিচ থেকে ভাষা সিলেক্ট করো 👇",
+            parse_mode='Markdown',
+            reply_markup=get_language_keyboard()
+        )
+        return
+
     if data.startswith("dub_"):
         target_lang = data[4:]
 
@@ -843,7 +868,8 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             bot=ctx.bot,
             uid=uid,
             audio_info=audio_info,
-            target_lang=target_lang
+            target_lang=target_lang,
+            source_lang=audio_info.get('source_lang')
         )
 
 # ══════════════════════════════════════════════
