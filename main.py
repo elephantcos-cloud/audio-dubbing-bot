@@ -3,7 +3,6 @@
 🎙️ Audio Dubbing Bot — Ultra Version
 Powered by Groq Whisper + Groq LLaMA + Edge TTS
 Python 3.11 | PTB 20.7
-✅ FIX: Render Conflict (409) error resolved
 """
 
 import os, io, time, asyncio, logging, threading, tempfile, functools
@@ -11,20 +10,19 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import Conflict, NetworkError, RetryAfter
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
 )
 from groq import Groq
 
-# ── FFmpeg fix for Render ──
+# ── FFmpeg fix for Render (apt-get কাজ না করলেও এটা কাজ করে) ──
 import imageio_ffmpeg
 from pydub import AudioSegment
 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 AudioSegment.ffprobe   = imageio_ffmpeg.get_ffmpeg_exe()
 
-import edge_tts
+from gtts import gTTS
 
 # ══════════════════════════════════════════════
 # ⚙️  CONFIG
@@ -126,20 +124,20 @@ LANGUAGES = {
 }
 
 TTS_VOICES = {
-    'bn': 'bn-BD-NabanitaNeural',
-    'en': 'en-US-JennyNeural',
-    'hi': 'hi-IN-SwaraNeural',
-    'ar': 'ar-SA-ZariyahNeural',
-    'fr': 'fr-FR-DeniseNeural',
-    'es': 'es-ES-ElviraNeural',
-    'de': 'de-DE-KatjaNeural',
-    'ja': 'ja-JP-NanamiNeural',
-    'ko': 'ko-KR-SunHiNeural',
-    'zh': 'zh-CN-XiaoxiaoNeural',
-    'ru': 'ru-RU-SvetlanaNeural',
-    'tr': 'tr-TR-EmelNeural',
-    'it': 'it-IT-ElsaNeural',
-    'ur': 'ur-PK-UzmaNeural',
+    'bn': 'bn',
+    'en': 'en',
+    'hi': 'hi',
+    'ar': 'ar',
+    'fr': 'fr',
+    'es': 'es',
+    'de': 'de',
+    'ja': 'ja',
+    'ko': 'ko',
+    'zh': 'zh-CN',
+    'ru': 'ru',
+    'tr': 'tr',
+    'it': 'it',
+    'ur': 'ur',
 }
 
 LANG_FULL_NAMES = {
@@ -201,6 +199,7 @@ def self_ping():
 # 🎨  KEYBOARDS
 # ══════════════════════════════════════════════
 def get_language_keyboard():
+    """ভাষা সিলেক্ট করার keyboard"""
     lang_items = list(LANGUAGES.items())
     keyboard = []
     for i in range(0, len(lang_items), 2):
@@ -226,6 +225,7 @@ def get_start_keyboard():
 # 🎵  CORE AUDIO PROCESSING
 # ══════════════════════════════════════════════
 def transcribe_audio_sync(audio_path: str) -> dict:
+    """Groq Whisper দিয়ে অডিও transcribe করো (timestamp সহ)"""
     ext = os.path.splitext(audio_path)[1].lower()
 
     with open(audio_path, 'rb') as f:
@@ -244,11 +244,19 @@ def transcribe_audio_sync(audio_path: str) -> dict:
 
     if hasattr(response, 'segments') and response.segments:
         for s in response.segments:
-            segments.append({
-                'start': float(s.start),
-                'end':   float(s.end),
-                'text':  s.text.strip()
-            })
+            # Groq API কখনো dict, কখনো object return করে — দুটোই handle করো
+            if isinstance(s, dict):
+                segments.append({
+                    'start': float(s.get('start', 0)),
+                    'end':   float(s.get('end', 0)),
+                    'text':  s.get('text', '').strip()
+                })
+            else:
+                segments.append({
+                    'start': float(s.start),
+                    'end':   float(s.end),
+                    'text':  s.text.strip()
+                })
         text = response.text or ' '.join(s['text'] for s in segments)
     elif hasattr(response, 'text'):
         text = response.text
@@ -256,6 +264,7 @@ def transcribe_audio_sync(audio_path: str) -> dict:
     return {'text': text, 'segments': segments}
 
 def translate_segment_sync(text: str, target_lang: str) -> str:
+    """Groq LLaMA দিয়ে টেক্সট অনুবাদ করো"""
     target_name = LANG_FULL_NAMES.get(target_lang, target_lang)
 
     system_prompt = (
@@ -285,11 +294,13 @@ def translate_segment_sync(text: str, target_lang: str) -> str:
     result = result.strip('"\'`')
     return result
 
-async def generate_tts_segment(text: str, voice: str, output_path: str):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(output_path)
+def generate_tts_segment(text: str, lang: str, output_path: str):
+    """Google TTS দিয়ে টেক্সট থেকে অডিও তৈরি করো"""
+    tts = gTTS(text=text, lang=lang, slow=False)
+    tts.save(output_path)
 
 def adjust_audio_timing(audio: AudioSegment, target_ms: int) -> AudioSegment:
+    """অডিওর timing ঠিক করো — speed up / slow down / pad"""
     current_ms = len(audio)
 
     if current_ms == 0:
@@ -344,6 +355,7 @@ async def run_dubbing_pipeline(
     audio_info: dict,
     target_lang: str
 ):
+    """সম্পূর্ণ ডাবিং pipeline চালাও"""
     lang_name = LANGUAGES[target_lang]
     voice     = TTS_VOICES.get(target_lang, 'en-US-JennyNeural')
     loop      = asyncio.get_event_loop()
@@ -435,6 +447,7 @@ async def run_dubbing_pipeline(
         # ── STEP 3: Translate + TTS + Timing ──
         output_audio  = AudioSegment.silent(duration=total_duration_ms)
         success_count = 0
+        last_tts_error = "অজানা কারণ"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for i, seg in enumerate(segments):
@@ -446,6 +459,7 @@ async def run_dubbing_pipeline(
                 if not seg_text or duration_ms <= 50:
                     continue
 
+                # Progress bar
                 bar_filled = (i + 1) * 10 // seg_count
                 bar_empty  = 10 - bar_filled
                 pct        = (i + 1) * 100 // seg_count
@@ -479,17 +493,26 @@ async def run_dubbing_pipeline(
                 # TTS generate
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
-                    await generate_tts_segment(translated, voice, tts_path)
+                    # Google TTS দিয়ে audio তৈরি (sync, executor-এ চালাও)
+                    await loop.run_in_executor(
+                        executor,
+                        functools.partial(generate_tts_segment, translated, voice, tts_path)
+                    )
+
+                    if not os.path.exists(tts_path) or os.path.getsize(tts_path) == 0:
+                        raise Exception(f"TTS file empty বা তৈরি হয়নি")
+
                     tts_audio = AudioSegment.from_file(tts_path)
                     adjusted  = adjust_audio_timing(tts_audio, duration_ms)
                     output_audio  = output_audio.overlay(adjusted, position=start_ms)
                     success_count += 1
                 except Exception as e:
+                    last_tts_error = str(e)
                     logger.error(f"TTS failed for seg {i}: {e}")
                     continue
 
             if success_count == 0:
-                raise Exception("কোনো segment process করা যায়নি! আবার চেষ্টা করো।")
+                raise Exception(f"TTS error: {last_tts_error}")
 
             # ── STEP 4: Export & Send ──
             await update_progress(
@@ -766,6 +789,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "back_main":
+        name = query.from_user.first_name
         text = (
             f"🎙️ *Audio Dubbing Bot*\n\n"
             f"অডিও পাঠাও → ভাষা সিলেক্ট করো → ডাব পাও!\n\n"
@@ -833,54 +857,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 # ══════════════════════════════════════════════
-# ✅  ERROR HANDLER — Conflict Fix
-# ══════════════════════════════════════════════
-async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    ✅ FIX: Render-এ একাধিক instance চললে Telegram 409 Conflict দেয়।
-    এই handler সেটা gracefully handle করে।
-    """
-    err = ctx.error
-
-    if isinstance(err, Conflict):
-        logger.warning(
-            "⚠️ Telegram Conflict (409): অন্য একটি bot instance চলছে। "
-            "১০ সেকেন্ড অপেক্ষা করে retry হবে..."
-        )
-        await asyncio.sleep(10)
-        return
-
-    if isinstance(err, RetryAfter):
-        logger.warning(f"⚠️ Rate limited! {err.retry_after}s পরে retry...")
-        await asyncio.sleep(err.retry_after + 1)
-        return
-
-    if isinstance(err, NetworkError):
-        logger.warning(f"⚠️ Network error: {err} — retry হবে")
-        await asyncio.sleep(5)
-        return
-
-    logger.error(f"❌ Unhandled error: {type(err).__name__}: {err}")
-
-# ══════════════════════════════════════════════
-# ✅  POST INIT — Webhook Clear (Conflict Fix)
-# ══════════════════════════════════════════════
-async def post_init(application: Application):
-    """
-    ✅ FIX: Bot start হওয়ার আগে পুরনো webhook ও pending updates মুছে দাও।
-    এতে Render redeploy-এর সময় 409 Conflict হয় না।
-    """
-    try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Webhook deleted + pending updates cleared — Conflict fix applied!")
-    except Exception as e:
-        logger.warning(f"⚠️ Webhook delete failed (ok to ignore): {e}")
-
-    # পুরনো instance মরার জন্য ৩ সেকেন্ড অপেক্ষা
-    await asyncio.sleep(3)
-    logger.info("✅ Bot initialized successfully!")
-
-# ══════════════════════════════════════════════
 # 🚀  MAIN
 # ══════════════════════════════════════════════
 def main():
@@ -900,12 +876,8 @@ def main():
         .token(BOT_TOKEN)
         .connection_pool_size(16)
         .get_updates_connection_pool_size(8)
-        .post_init(post_init)          # ✅ FIX: Webhook clear on startup
         .build()
     )
-
-    # ✅ FIX: Error handler যোগ করা হয়েছে
-    app.add_error_handler(error_handler)
 
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("help",   cmd_help))
