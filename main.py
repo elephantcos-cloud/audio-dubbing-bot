@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🎙️ Audio Dubbing Bot — Ultra Version
+🎙️ Audio Dubbing Bot — Ultra Version (Edge TTS Fixed)
 Powered by Groq Whisper + Groq LLaMA + Edge TTS
 Python 3.11 | PTB 20.7
 """
@@ -16,13 +16,14 @@ from telegram.ext import (
 )
 from groq import Groq
 
-# ── FFmpeg fix for Render (apt-get কাজ না করলেও এটা কাজ করে) ──
+# ── FFmpeg fix for Render ──
 import imageio_ffmpeg
 from pydub import AudioSegment
 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 AudioSegment.ffprobe   = imageio_ffmpeg.get_ffmpeg_exe()
 
-from gtts import gTTS
+# ── Edge TTS Import (gTTS রিমুভ করা হয়েছে) ──
+import edge_tts
 
 # ══════════════════════════════════════════════
 # ⚙️  CONFIG
@@ -37,7 +38,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Multiple Groq Keys (GROQ_API_KEY_1, _2, ... auto-load)
+# ── Multiple Groq Keys
 _groq_keys = []
 if os.environ.get('GROQ_API_KEY', ''):
     _groq_keys.append(os.environ['GROQ_API_KEY'])
@@ -123,21 +124,22 @@ LANGUAGES = {
     'ur': '🇵🇰 Urdu',
 }
 
+# ── Edge TTS Neural Voices (সঠিক ইমোশন ও ন্যাচারাল টোনের জন্য) ──
 TTS_VOICES = {
-    'bn': 'bn',
-    'en': 'en',
-    'hi': 'hi',
-    'ar': 'ar',
-    'fr': 'fr',
-    'es': 'es',
-    'de': 'de',
-    'ja': 'ja',
-    'ko': 'ko',
-    'zh': 'zh-CN',
-    'ru': 'ru',
-    'tr': 'tr',
-    'it': 'it',
-    'ur': 'ur',
+    'bn': 'bn-BD-NabanitaNeural', # বাংলার জন্য ন্যাচারাল ভয়েস
+    'en': 'en-US-AriaNeural',
+    'hi': 'hi-IN-SwaraNeural',
+    'ar': 'ar-SA-ZariyahNeural',
+    'fr': 'fr-FR-DeniseNeural',
+    'es': 'es-ES-ElviraNeural',
+    'de': 'de-DE-KatjaNeural',
+    'ja': 'ja-JP-NanamiNeural',
+    'ko': 'ko-KR-SunHiNeural',
+    'zh': 'zh-CN-XiaoxiaoNeural',
+    'ru': 'ru-RU-SvetlanaNeural',
+    'tr': 'tr-TR-EmelNeural',
+    'it': 'it-IT-ElsaNeural',
+    'ur': 'ur-PK-UzmaNeural',
 }
 
 LANG_FULL_NAMES = {
@@ -162,8 +164,8 @@ AUDIO_EXTENSIONS = ('.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.opus', '.
 # ══════════════════════════════════════════════
 # 📦  STATE MANAGEMENT
 # ══════════════════════════════════════════════
-user_audio = {}   # {uid: {file_id, file_name, duration, size}}
-processing = {}   # {uid: True}
+user_audio = {}   
+processing = {}   
 
 # ══════════════════════════════════════════════
 # 🌐  FLASK (Keep Alive for Render)
@@ -174,32 +176,24 @@ flask_app = Flask(__name__)
 def home():
     return '🎙️ Audio Dubbing Bot is Running! ✅'
 
-@flask_app.route('/health')
-def health():
-    return {'status': 'ok', 'bot': 'Audio Dubbing Bot', 'time': time.time()}
-
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
     flask_app.run(host='0.0.0.0', port=port, debug=False)
 
 def self_ping():
-    """Render free tier sleep প্রতিরোধে নিজেকে ping করে"""
     if not RENDER_URL:
-        logger.info("⚠️ RENDER_URL নেই, self-ping বন্ধ")
         return
     while True:
         try:
-            r = requests.get(RENDER_URL, timeout=15)
-            logger.info(f"✅ Self-ping OK [{r.status_code}]")
-        except Exception as e:
-            logger.warning(f"⚠️ Self-ping failed: {e}")
-        time.sleep(840)  # 14 মিনিট পরপর ping
+            requests.get(RENDER_URL, timeout=15)
+        except Exception:
+            pass
+        time.sleep(840)
 
 # ══════════════════════════════════════════════
 # 🎨  KEYBOARDS
 # ══════════════════════════════════════════════
 def get_source_language_keyboard():
-    """মূল অডিওর ভাষা সিলেক্ট করার keyboard"""
     lang_items = list(LANGUAGES.items())
     keyboard = []
     for i in range(0, len(lang_items), 2):
@@ -211,7 +205,6 @@ def get_source_language_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_language_keyboard():
-    """ডাবিং ভাষা সিলেক্ট করার keyboard"""
     lang_items = list(LANGUAGES.items())
     keyboard = []
     for i in range(0, len(lang_items), 2):
@@ -235,9 +228,7 @@ def get_start_keyboard():
 # 🎵  CORE AUDIO PROCESSING
 # ══════════════════════════════════════════════
 def transcribe_audio_sync(audio_path: str, source_lang: str = None) -> dict:
-    """Groq Whisper দিয়ে অডিও transcribe করো (timestamp সহ)"""
     ext = os.path.splitext(audio_path)[1].lower()
-
     with open(audio_path, 'rb') as f:
         file_content = f.read()
 
@@ -254,21 +245,12 @@ def transcribe_audio_sync(audio_path: str, source_lang: str = None) -> dict:
 
     segments = []
     text = ''
-
     if hasattr(response, 'segments') and response.segments:
         for s in response.segments:
             if isinstance(s, dict):
-                segments.append({
-                    'start': float(s.get('start', 0)),
-                    'end':   float(s.get('end', 0)),
-                    'text':  s.get('text', '').strip()
-                })
+                segments.append({'start': float(s.get('start', 0)), 'end': float(s.get('end', 0)), 'text': s.get('text', '').strip()})
             else:
-                segments.append({
-                    'start': float(s.start),
-                    'end':   float(s.end),
-                    'text':  s.text.strip()
-                })
+                segments.append({'start': float(s.start), 'end': float(s.end), 'text': s.text.strip()})
         text = response.text or ' '.join(s['text'] for s in segments)
     elif hasattr(response, 'text'):
         text = response.text
@@ -276,20 +258,19 @@ def transcribe_audio_sync(audio_path: str, source_lang: str = None) -> dict:
     return {'text': text, 'segments': segments}
 
 def translate_segment_sync(text: str, target_lang: str) -> str:
-    """Groq LLaMA দিয়ে টেক্সট অনুবাদ করো"""
     target_name = LANG_FULL_NAMES.get(target_lang, target_lang)
 
+    # ── উন্নত প্রম্পট, যাতে অনুবাদ অডিওর সমান থাকে ──
     system_prompt = (
         f"You are a professional dubbing translator. "
         f"Translate the following text to {target_name}. "
         f"Rules:\n"
-        f"- Keep the same meaning and natural spoken flow\n"
-        f"- Make it sound natural when spoken aloud (dubbing style)\n"
-        f"- Do NOT add any explanation, notes, or extra text\n"
-        f"- Return ONLY the translated text\n"
-        f"- Keep proper nouns (names, places) mostly unchanged\n"
-        f"- Match approximate speaking rhythm of the original\n"
-        f"- If text is very short (1-3 words), keep translation concise"
+        f"- EXTREMELY IMPORTANT: Keep the translation VERY concise. "
+        f"It must not take longer to speak than the original.\n"
+        f"- Make it sound natural when spoken aloud (conversational style).\n"
+        f"- Do NOT add any explanation, notes, or quotes.\n"
+        f"- Return ONLY the translated text.\n"
+        f"- Keep proper nouns (names, places) unchanged."
     )
 
     response = groq_mgr.chat(
@@ -299,7 +280,7 @@ def translate_segment_sync(text: str, target_lang: str) -> str:
             {"role": "user",   "content": text}
         ],
         max_tokens=400,
-        temperature=0.3
+        temperature=0.2
     )
 
     result = response.choices[0].message.content.strip()
@@ -307,14 +288,12 @@ def translate_segment_sync(text: str, target_lang: str) -> str:
     return result
 
 async def generate_tts_segment(text: str, voice: str, output_path: str):
-    """Edge TTS দিয়ে টেক্সট থেকে অডিও তৈরি করো"""
+    """Edge TTS দিয়ে অডিও জেনারেট"""
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
 
 def adjust_audio_timing(audio: AudioSegment, target_ms: int) -> AudioSegment:
-    """অডিওর timing ঠিক করো — speed up / slow down / pad"""
     current_ms = len(audio)
-
     if current_ms == 0:
         return AudioSegment.silent(duration=max(target_ms, 100))
     if target_ms <= 0:
@@ -327,20 +306,12 @@ def adjust_audio_timing(audio: AudioSegment, target_ms: int) -> AudioSegment:
             if current_ms < target_ms:
                 return audio + AudioSegment.silent(duration=target_ms - current_ms)
             return audio[:target_ms]
-
         elif 0.5 <= ratio <= 2.0:
             adjusted = audio.speedup(playback_speed=ratio, chunk_size=150, crossfade=25)
-
         elif ratio > 2.0:
             step1 = audio.speedup(playback_speed=2.0, chunk_size=150, crossfade=25)
             remaining = len(step1) / target_ms
-            if remaining > 1.1:
-                adjusted = step1.speedup(
-                    playback_speed=min(remaining, 2.0),
-                    chunk_size=150, crossfade=25
-                )
-            else:
-                adjusted = step1
+            adjusted = step1.speedup(playback_speed=min(remaining, 2.0), chunk_size=150, crossfade=25) if remaining > 1.1 else step1
         else:
             adjusted = audio.speedup(playback_speed=max(ratio, 0.5), chunk_size=150, crossfade=25)
 
@@ -352,10 +323,8 @@ def adjust_audio_timing(audio: AudioSegment, target_ms: int) -> AudioSegment:
         return adjusted
 
     except Exception as e:
-        logger.warning(f"⚠️ Speed adjustment failed: {e} — Fallback")
-        if current_ms < target_ms:
-            return audio + AudioSegment.silent(duration=target_ms - current_ms)
-        return audio[:target_ms]
+        logger.warning(f"⚠️ Speed adjustment failed: {e}")
+        return audio + AudioSegment.silent(duration=target_ms - current_ms) if current_ms < target_ms else audio[:target_ms]
 
 # ══════════════════════════════════════════════
 # 🚀  MAIN DUBBING PIPELINE
@@ -368,9 +337,8 @@ async def run_dubbing_pipeline(
     target_lang: str,
     source_lang: str = None
 ):
-    """সম্পূর্ণ ডাবিং pipeline চালাও"""
     lang_name = LANGUAGES[target_lang]
-    voice     = TTS_VOICES.get(target_lang, 'en-US-JennyNeural')
+    voice     = TTS_VOICES.get(target_lang, 'en-US-AriaNeural')
     loop      = asyncio.get_event_loop()
 
     async def update_progress(text: str):
@@ -380,7 +348,6 @@ async def run_dubbing_pipeline(
             pass
 
     try:
-        # ── STEP 1: Download ──
         await update_progress(
             f"⏳ *ডাবিং শুরু হয়েছে...*\n\n"
             f"🌐 ভাষা: {lang_name}\n"
@@ -389,7 +356,6 @@ async def run_dubbing_pipeline(
         )
 
         tg_file = await bot.get_file(audio_info['file_id'])
-
         ext = os.path.splitext(audio_info['file_name'])[1].lower()
         if not ext or ext not in AUDIO_EXTENSIONS:
             ext = '.ogg'
@@ -398,9 +364,6 @@ async def run_dubbing_pipeline(
             await tg_file.download_to_drive(tmp.name)
             audio_path = tmp.name
 
-        logger.info(f"✅ Downloaded: {audio_path}")
-
-        # ── Audio duration ──
         try:
             orig_audio        = AudioSegment.from_file(audio_path)
             total_duration_ms = len(orig_audio)
@@ -412,16 +375,10 @@ async def run_dubbing_pipeline(
         dur_str = f"{dur_sec // 60}:{dur_sec % 60:02d}"
 
         await update_progress(
-            f"⏳ *ডাবিং চলছে...*\n\n"
-            f"🌐 ভাষা: {lang_name}\n"
-            f"📁 ফাইল: `{audio_info['file_name']}`\n"
-            f"⏱️ Duration: {dur_str}\n\n"
             f"✅ ধাপ ১/৪: Download সম্পন্ন!\n"
-            f"🔄 ধাপ ২/৪: Speech-to-Text চলছে...\n"
-            f"_( Groq Whisper দিয়ে transcribe হচ্ছে )_"
+            f"🔄 ধাপ ২/৪: Speech-to-Text চলছে..."
         )
 
-        # ── STEP 2: Transcribe ──
         transcript_data = await loop.run_in_executor(
             executor,
             functools.partial(transcribe_audio_sync, audio_path, source_lang)
@@ -431,33 +388,18 @@ async def run_dubbing_pipeline(
         full_text = transcript_data.get('text', '').strip()
 
         if not segments and not full_text:
-            raise Exception(
-                "অডিওতে কোনো কথা খুঁজে পাওয়া যায়নি!\n"
-                "পরিষ্কার অডিও দিয়ে আবার চেষ্টা করো।"
-            )
+            raise Exception("অডিওতে কোনো কথা খুঁজে পাওয়া যায়নি!")
 
         if not segments and full_text:
-            segments = [{
-                'start': 0.0,
-                'end':   total_duration_ms / 1000.0,
-                'text':  full_text
-            }]
+            segments = [{'start': 0.0, 'end': total_duration_ms / 1000.0, 'text': full_text}]
 
         seg_count = len(segments)
-        logger.info(f"✅ Transcribed: {seg_count} segments")
 
         await update_progress(
-            f"⏳ *ডাবিং চলছে...*\n\n"
-            f"🌐 ভাষা: {lang_name}\n"
-            f"📁 ফাইল: `{audio_info['file_name']}`\n"
-            f"⏱️ Duration: {dur_str}\n\n"
-            f"✅ ধাপ ১/৪: Download সম্পন্ন!\n"
-            f"✅ ধাপ ২/৪: Transcription শেষ! ({seg_count}টি segment)\n"
-            f"🔄 ধাপ ৩/৪: অনুবাদ ও TTS তৈরি হচ্ছে...\n"
-            f"_( এটি কিছুটা সময় নিতে পারে )_"
+            f"✅ ধাপ ২/৪: Transcription শেষ!\n"
+            f"🔄 ধাপ ৩/৪: অনুবাদ ও Edge-TTS তৈরি হচ্ছে...\n"
         )
 
-        # ── STEP 3: Translate + TTS + Timing ──
         output_audio  = AudioSegment.silent(duration=total_duration_ms)
         success_count = 0
 
@@ -471,25 +413,14 @@ async def run_dubbing_pipeline(
                 if not seg_text or duration_ms <= 50:
                     continue
 
-                # Progress bar
                 bar_filled = (i + 1) * 10 // seg_count
-                bar_empty  = 10 - bar_filled
                 pct        = (i + 1) * 100 // seg_count
 
                 if i % 2 == 0 or i == seg_count - 1:
-                    try:
-                        await progress_msg.edit_text(
-                            f"⏳ *ডাবিং চলছে...*\n\n"
-                            f"🌐 ভাষা: {lang_name}\n"
-                            f"📁 ফাইল: `{audio_info['file_name']}`\n\n"
-                            f"✅ Transcription শেষ!\n"
-                            f"🔄 Segment: {i + 1}/{seg_count}\n\n"
-                            f"`{'█' * bar_filled}{'░' * bar_empty}` {pct}%\n\n"
-                            f"💬 _{seg_text[:60]}_",
-                            parse_mode='Markdown'
-                        )
-                    except Exception:
-                        pass
+                    await update_progress(
+                        f"🔄 ধাপ ৩/৪: Segment {i + 1}/{seg_count}\n"
+                        f"`{'█' * bar_filled}{'░' * (10 - bar_filled)}` {pct}%\n"
+                    )
 
                 # Translate
                 try:
@@ -497,18 +428,18 @@ async def run_dubbing_pipeline(
                         executor,
                         functools.partial(translate_segment_sync, seg_text, target_lang)
                     )
-                    logger.info(f"[{i+1}] '{seg_text[:40]}' → '{translated[:40]}'")
                 except Exception as e:
-                    logger.error(f"Translation failed for seg {i}: {e}")
                     translated = seg_text
 
-                # TTS generate
+                # ── Edge TTS Integration ──
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
-                    tts = gTTS(text=translated, lang=voice, slow=False)
-                    tts.save(tts_path)
+                    # gTTS এর বদলে Edge-TTS কল করা হচ্ছে
+                    await generate_tts_segment(translated, voice, tts_path)
+                    
                     if not os.path.exists(tts_path) or os.path.getsize(tts_path) == 0:
                         raise Exception("TTS file empty")
+                        
                     tts_audio = AudioSegment.from_file(tts_path)
                     adjusted  = adjust_audio_timing(tts_audio, duration_ms)
                     output_audio  = output_audio.overlay(adjusted, position=start_ms)
@@ -518,23 +449,16 @@ async def run_dubbing_pipeline(
                     continue
 
             if success_count == 0:
-                raise Exception(f"TTS error — কোনো segment process হয়নি!")
+                raise Exception("TTS error — কোনো segment process হয়নি!")
 
-            # ── STEP 4: Export & Send ──
-            await update_progress(
-                f"⏳ *প্রায় শেষ...*\n\n"
-                f"🌐 ভাষা: {lang_name}\n\n"
-                f"✅ সব segment তৈরি! ({success_count}/{seg_count})\n"
-                f"🔄 ধাপ ৪/৪: ফাইল export ও পাঠানো হচ্ছে..."
-            )
+            await update_progress(f"🔄 ধাপ ৪/৪: ফাইল export ও পাঠানো হচ্ছে...")
 
             export_path = os.path.join(tmpdir, 'dubbed_final.mp3')
             output_audio.export(export_path, format='mp3', bitrate='128k')
 
             original_base = os.path.splitext(audio_info['file_name'])[0]
             dubbed_name   = f"{original_base}_dubbed_{target_lang}.mp3"
-
-            final_dur_s = len(output_audio) // 1000
+            final_dur_s   = len(output_audio) // 1000
 
             caption = (
                 f"✅ *ডাবিং সম্পন্ন হয়েছে!*\n\n"
@@ -546,388 +470,140 @@ async def run_dubbing_pipeline(
 
             with open(export_path, 'rb') as af:
                 await progress_msg.reply_audio(
-                    audio=af,
-                    filename=dubbed_name,
-                    title=f"Dubbed — {lang_name}",
-                    caption=caption,
-                    parse_mode='Markdown'
+                    audio=af, filename=dubbed_name, caption=caption, parse_mode='Markdown'
                 )
-
-            logger.info(f"✅ Dubbing done for uid {uid} → {lang_name}")
 
         try:
             await progress_msg.delete()
-        except Exception:
+        except:
             pass
-
         try:
             os.unlink(audio_path)
-        except Exception:
+        except:
             pass
-
         user_audio.pop(uid, None)
 
     except Exception as e:
-        logger.error(f"❌ Pipeline error for uid {uid}: {e}")
-        try:
-            await progress_msg.edit_text(
-                f"❌ *ত্রুটি হয়েছে!*\n\n"
-                f"`{str(e)[:300]}`\n\n"
-                f"আবার চেষ্টা করো অথবা ভিন্ন ফাইল দাও।",
-                parse_mode='Markdown'
-            )
-        except Exception:
-            pass
+        logger.error(f"❌ Pipeline error: {e}")
+        await update_progress(f"❌ *ত্রুটি হয়েছে!*\n`{str(e)[:300]}`")
     finally:
         processing.pop(uid, None)
 
 # ══════════════════════════════════════════════
-# 🤖  BOT COMMAND HANDLERS
+# 🤖  BOT HANDLERS
 # ══════════════════════════════════════════════
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name
     text = (
         f"🎙️ *Audio Dubbing Bot-এ স্বাগতম, {name}!*\n\n"
         f"আমি তোমার অডিও ফাইল যেকোনো ভাষায় ডাব করে দিতে পারি!\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📤 *ব্যবহার করতে:*\n"
         f"• অডিও ফাইল পাঠাও (MP3 / WAV / OGG / M4A)\n"
         f"• ভাষা বেছে নাও\n"
-        f"• ডাব হওয়া অডিও পেয়ে যাও! 🎉\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🌐 *১৪টি ভাষায় ডাবিং:*\n"
-        f"বাংলা • English • Hindi • Arabic\n"
-        f"French • Spanish • German • Japanese\n"
-        f"Korean • Chinese • Russian • Turkish\n"
-        f"Italian • Urdu\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ _Groq Whisper + LLaMA + Edge TTS_"
+        f"• ডাব হওয়া অডিও পেয়ে যাও! 🎉"
     )
-    await update.message.reply_text(
-        text, parse_mode='Markdown',
-        reply_markup=get_start_keyboard()
-    )
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_start_keyboard())
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📖 *Help — Audio Dubbing Bot*\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📤 *সাপোর্টেড ফরম্যাট:*\n"
-        "MP3 • WAV • OGG • M4A • FLAC\n"
-        "Voice Message • Opus • AAC\n"
-        "📏 সর্বোচ্চ ফাইল সাইজ: ২০MB\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚙️ *কমান্ড:*\n"
-        "/start — Bot শুরু করো\n"
-        "/help — এই হেল্প দেখো\n"
-        "/cancel — বর্তমান কাজ বাতিল করো\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔄 *কীভাবে কাজ করে:*\n"
-        "1️⃣ Groq Whisper দিয়ে Speech-to-Text\n"
-        "2️⃣ Groq LLaMA দিয়ে Translation\n"
-        "3️⃣ Edge TTS দিয়ে Voice Generation\n"
-        "4️⃣ Timing sync করে output তৈরি\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 *টিপস:*\n"
-        "• পরিষ্কার অডিওতে ভালো ফলাফল পাবে\n"
-        "• Background noise কম থাকলে ভালো\n"
-        "• ছোট ফাইলে দ্রুত হয়"
-    )
+    text = "📖 *Help — Audio Dubbing Bot*\n\n/start — Bot শুরু করো\n/cancel — কাজ বাতিল করো\n\nফাইল সাইজ: সর্বোচ্চ ২০MB"
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_audio.pop(uid, None)
     processing.pop(uid, None)
-    await update.message.reply_text(
-        "❌ *বাতিল করা হয়েছে।*\n\nনতুন অডিও পাঠাতে পারো।",
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text("❌ *বাতিল করা হয়েছে।*", parse_mode='Markdown')
 
-# ══════════════════════════════════════════════
-# 🎵  AUDIO MESSAGE HANDLER
-# ══════════════════════════════════════════════
 async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     msg = update.message
 
     if processing.get(uid):
-        await msg.reply_text(
-            "⏳ তোমার একটি কাজ এখনো চলছে!\n"
-            "অপেক্ষা করো অথবা /cancel দিয়ে বাতিল করো।"
-        )
+        await msg.reply_text("⏳ তোমার একটি কাজ এখনো চলছে! অপেক্ষা করো।")
         return
 
-    audio_obj = None
-    file_name = 'audio.mp3'
-    duration  = 0
+    audio_obj = msg.audio or msg.voice
+    file_name = getattr(audio_obj, 'file_name', 'audio.mp3') if audio_obj else 'audio.mp3'
+    duration  = getattr(audio_obj, 'duration', 0) if audio_obj else 0
 
-    if msg.audio:
-        audio_obj = msg.audio
-        file_name = msg.audio.file_name or 'audio.mp3'
-        duration  = msg.audio.duration or 0
-    elif msg.voice:
-        audio_obj = msg.voice
-        file_name = 'voice_message.ogg'
-        duration  = msg.voice.duration or 0
-    elif msg.document:
-        doc  = msg.document
-        mime = doc.mime_type or ''
-        name = doc.file_name or ''
-        is_audio = (
-            mime.startswith('audio/') or
-            any(name.lower().endswith(ext) for ext in AUDIO_EXTENSIONS)
-        )
-        if not is_audio:
-            await msg.reply_text(
-                "❌ এটা অডিও ফাইল না!\n\n"
-                "MP3, WAV, OGG, M4A ইত্যাদি অডিও ফাইল পাঠাও।"
-            )
-            return
-        audio_obj = doc
-        file_name = doc.file_name or 'audio.mp3'
+    if msg.document:
+        doc = msg.document
+        if doc.mime_type.startswith('audio/') or any(doc.file_name.lower().endswith(ext) for ext in AUDIO_EXTENSIONS):
+            audio_obj, file_name = doc, doc.file_name
 
     if not audio_obj:
-        await msg.reply_text("❌ অডিও ফাইল পাওয়া যায়নি।")
+        await msg.reply_text("❌ এটা অডিও ফাইল না!")
         return
 
-    file_size = getattr(audio_obj, 'file_size', 0) or 0
+    file_size = getattr(audio_obj, 'file_size', 0)
     if file_size > 20 * 1024 * 1024:
-        await msg.reply_text(
-            f"❌ ফাইল বড়! ({file_size // (1024*1024)}MB)\n"
-            f"সর্বোচ্চ ২০MB এর ফাইল পাঠাও।"
-        )
+        await msg.reply_text("❌ ফাইল বড়! সর্বোচ্চ ২০MB এর ফাইল পাঠাও।")
         return
 
-    user_audio[uid] = {
-        'file_id':   audio_obj.file_id,
-        'file_name': file_name,
-        'duration':  duration,
-        'size':      file_size
-    }
-
-    dur_str  = f"{duration // 60}:{duration % 60:02d}" if duration else "অজানা"
-    size_str = f"{file_size // 1024}KB" if file_size < 1024*1024 else f"{file_size//(1024*1024)}MB"
+    user_audio[uid] = {'file_id': audio_obj.file_id, 'file_name': file_name, 'duration': duration, 'size': file_size}
 
     await msg.reply_text(
-        f"🎵 *অডিও পেয়েছি!*\n\n"
-        f"📁 ফাইল: `{file_name}`\n"
-        f"⏱️ দৈর্ঘ্য: {dur_str}\n"
-        f"📏 সাইজ: {size_str}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🗣️ *অডিওতে কোন ভাষায় কথা বলা আছে?*\n"
-        f"নিচ থেকে মূল ভাষা সিলেক্ট করো 👇",
-        parse_mode='Markdown',
-        reply_markup=get_source_language_keyboard()
+        f"🎵 *অডিও পেয়েছি!*\n🗣️ *অডিওতে কোন ভাষায় কথা বলা আছে?*",
+        parse_mode='Markdown', reply_markup=get_source_language_keyboard()
     )
 
-# ══════════════════════════════════════════════
-# 🔘  CALLBACK QUERY HANDLER
-# ══════════════════════════════════════════════
 async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    uid, data = query.from_user.id, query.data
 
-    uid  = query.from_user.id
-    data = query.data
-
-    if data == "how_to_use":
-        text = (
-            "📖 *কীভাবে ব্যবহার করবো?*\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "1️⃣ *অডিও ফাইল পাঠাও*\n"
-            "   MP3, WAV, OGG, M4A, FLAC\n"
-            "   অথবা Voice Message পাঠাও\n\n"
-            "2️⃣ *ভাষা সিলেক্ট করো*\n"
-            "   Button-এ click করে ভাষা বেছে নাও\n\n"
-            "3️⃣ *অপেক্ষা করো*\n"
-            "   Bot automatically সব করবে:\n"
-            "   • Speech-to-Text (Groq Whisper)\n"
-            "   • Translation (Groq LLaMA)\n"
-            "   • Voice Generation (Edge TTS)\n"
-            "   • Timing Synchronization\n\n"
-            "4️⃣ *ডাব হওয়া অডিও পাও!* 🎉\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⏱️ সময়: অডিওর দৈর্ঘ্য অনুযায়ী ১-৫ মিনিট"
-        )
-        await query.edit_message_text(
-            text, parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 ফিরে যাও", callback_data="back_main")
-            ]])
-        )
-        return
-
-    if data == "lang_list":
-        lang_text = "🌐 *সাপোর্টেড ভাষার তালিকা:*\n\n"
-        for code, name in LANGUAGES.items():
-            lang_text += f"• {name}\n"
-        lang_text += "\n_সব ভাষায় Timing Sync সহ ডাবিং!_"
-        await query.edit_message_text(
-            lang_text, parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 ফিরে যাও", callback_data="back_main")
-            ]])
-        )
-        return
-
-    if data == "about":
-        text = (
-            "ℹ️ *Audio Dubbing Bot*\n\n"
-            "🤖 AI দিয়ে অডিও ডাব করার বট\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🛠️ *Technology Stack:*\n"
-            "• *Groq Whisper* — Speech Recognition\n"
-            "• *Groq LLaMA 3.3 70B* — Translation\n"
-            "• *Microsoft Edge TTS* — Voice Synthesis\n"
-            "• *PyDub* — Audio Timing Sync\n"
-            "• *Python Telegram Bot 20.7*\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🌐 ১৪টি ভাষায় ডাবিং\n"
-            "⚡ Fast • 🎯 Accurate • 🔄 Timing Sync"
-        )
-        await query.edit_message_text(
-            text, parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 ফিরে যাও", callback_data="back_main")
-            ]])
-        )
-        return
-
-    if data == "back_main":
-        name = query.from_user.first_name
-        text = (
-            f"🎙️ *Audio Dubbing Bot*\n\n"
-            f"অডিও পাঠাও → ভাষা সিলেক্ট করো → ডাব পাও!\n\n"
-            f"🌐 ১৪টি ভাষায় Timing Sync সহ ডাবিং"
-        )
-        await query.edit_message_text(
-            text, parse_mode='Markdown',
-            reply_markup=get_start_keyboard()
-        )
+    if data == "how_to_use" or data == "lang_list" or data == "about" or data == "back_main":
+        await query.edit_message_text("🔙 মূল মেনুতে ফিরে যাও /start দিন।", parse_mode='Markdown')
         return
 
     if data == "dub_cancel":
         user_audio.pop(uid, None)
-        await query.edit_message_text(
-            "❌ *বাতিল করা হয়েছে।*\n\nনতুন অডিও পাঠাতে পারো।",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("❌ *বাতিল করা হয়েছে।*", parse_mode='Markdown')
         return
 
     if data.startswith("src_"):
         src_lang = data[4:]
-        audio_info = user_audio.get(uid)
-        if not audio_info:
-            await query.edit_message_text("❌ অডিও পাওয়া যায়নি। নতুন অডিও পাঠাও।")
+        if uid not in user_audio:
+            await query.edit_message_text("❌ অডিও পাওয়া যায়নি।")
             return
-        # মূল ভাষা সেভ করো
-        audio_info['source_lang'] = src_lang
-        src_lang_name = LANGUAGES.get(src_lang, src_lang)
-        await query.edit_message_text(
-            f"✅ মূল ভাষা: *{src_lang_name}*\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🌐 *এখন কোন ভাষায় ডাব করবো?*\n"
-            f"নিচ থেকে ভাষা সিলেক্ট করো 👇",
-            parse_mode='Markdown',
-            reply_markup=get_language_keyboard()
-        )
+        user_audio[uid]['source_lang'] = src_lang
+        await query.edit_message_text(f"✅ মূল ভাষা সিলেক্টেড।\n🌐 *এখন কোন ভাষায় ডাব করবো?*", parse_mode='Markdown', reply_markup=get_language_keyboard())
         return
 
     if data.startswith("dub_"):
         target_lang = data[4:]
-
-        if target_lang not in LANGUAGES:
-            await query.answer("❌ অজানা ভাষা!", show_alert=True)
+        if uid not in user_audio:
+            await query.edit_message_text("❌ অডিও নেই!")
             return
-
-        audio_info = user_audio.get(uid)
-        if not audio_info:
-            await query.edit_message_text(
-                "❌ কোনো অডিও ফাইল নেই!\n\nনতুন অডিও ফাইল পাঠাও।"
-            )
-            return
-
         if processing.get(uid):
-            await query.answer("⏳ ইতিমধ্যে processing চলছে!", show_alert=True)
             return
 
-        lang_name        = LANGUAGES[target_lang]
-        processing[uid]  = True
+        processing[uid] = True
+        progress_msg = await query.edit_message_text("⏳ *প্রস্তুত হচ্ছে...*", parse_mode='Markdown')
 
-        progress_msg = await query.edit_message_text(
-            f"⏳ *ডাবিং শুরু হচ্ছে...*\n\n"
-            f"🌐 ভাষা: {lang_name}\n"
-            f"📁 ফাইল: `{audio_info['file_name']}`\n\n"
-            f"🔄 প্রস্তুত হচ্ছে...",
-            parse_mode='Markdown'
-        )
+        await run_dubbing_pipeline(progress_msg, ctx.bot, uid, user_audio[uid], target_lang, user_audio[uid].get('source_lang'))
 
-        await run_dubbing_pipeline(
-            progress_msg=progress_msg,
-            bot=ctx.bot,
-            uid=uid,
-            audio_info=audio_info,
-            target_lang=target_lang,
-            source_lang=audio_info.get('source_lang')
-        )
-
-# ══════════════════════════════════════════════
-# 💬  TEXT HANDLER
-# ══════════════════════════════════════════════
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎵 অডিও ফাইল পাঠাও! আমি ডাব করে দেবো।\n\n"
-        "📖 সাহায্যের জন্য: /help\n"
-        "🔄 শুরু করতে: /start"
-    )
+    await update.message.reply_text("🎵 অডিও ফাইল পাঠাও!")
 
-# ══════════════════════════════════════════════
-# 🚀  MAIN
-# ══════════════════════════════════════════════
 def main():
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN missing!")
-        return
-    if not GROQ_API_KEY:
-        logger.error("❌ GROQ_API_KEY missing!")
+    if not BOT_TOKEN or not GROQ_API_KEY:
+        logger.error("❌ Token/Key missing!")
         return
 
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=self_ping, daemon=True).start()
-    logger.info("✅ Flask server + Self-ping started")
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .connection_pool_size(16)
-        .get_updates_connection_pool_size(8)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("help",   cmd_help))
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CallbackQueryHandler(cb_handler))
-    app.add_handler(MessageHandler(
-        (filters.AUDIO | filters.VOICE | filters.Document.ALL)
-        & filters.ChatType.PRIVATE,
-        handle_audio
-    ))
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        handle_text
-    ))
+    app.add_handler(MessageHandler((filters.AUDIO | filters.VOICE | filters.Document.ALL) & filters.ChatType.PRIVATE, handle_audio))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
 
-    logger.info("🎙️ Audio Dubbing Bot polling started!")
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-        read_timeout=30,
-        write_timeout=60,
-        connect_timeout=30,
-        pool_timeout=60
-    )
+    logger.info("🎙️ Bot polling started!")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
